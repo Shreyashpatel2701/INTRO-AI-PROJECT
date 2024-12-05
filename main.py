@@ -25,17 +25,31 @@ def init_map():
         data['time'] = data['weight'] / random.uniform(20, 50)  # Simulate travel time
     return G
 
-def simulate_traffic_updates(G, interval=5):
-    """Simulate traffic by updating weights randomly every `interval` seconds."""
-    def update_traffic():
-        while True:
-            for u, v, key, data in G.edges(keys=True, data=True):
+class TrafficSimulator:
+    """Class to handle traffic simulation."""
+    def __init__(self, G, interval=5):
+        self.G = G
+        self.interval = interval
+        self.running = False
+        self.thread = None
+
+    def start(self):
+        if not self.running:
+            self.running = True
+            self.thread = threading.Thread(target=self.update_traffic, daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        self.running = False
+
+    def update_traffic(self):
+        while self.running:
+            for u, v, key, data in self.G.edges(keys=True, data=True):
                 traffic_factor = random.uniform(0.8, 2.0)  # Simulate traffic (weights vary)
                 data['weight'] = data['original_weight'] * traffic_factor  # Use original weight
-                data['cost'] = data['weight'] * random.uniform(0.8, 1.5)
-                data['time'] = data['weight'] / random.uniform(20, 50)
-            time.sleep(interval)
-    threading.Thread(target=update_traffic, daemon=True).start()
+                data['cost'] = data['weight'] * random.uniform(0.8, 3)
+                data['time'] = data['weight'] / random.uniform(20, 75)
+            time.sleep(self.interval)
 
 def plot_map_with_closures(G, start_node=None, stop_node=None, waypoints=None, path_edges=None, closed_edges=None):
     """Visualize the map, highlighting closed edges."""
@@ -193,8 +207,9 @@ class MapApp:
         self.canvas_widget = self.canvas.get_tk_widget()
         self.canvas_widget.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
+        self.traffic_simulator = TrafficSimulator(self.G)  # Initialize traffic simulator
         self.setup_ui()
-        simulate_traffic_updates(self.G)  # Start traffic simulation
+        self.start_map_update_loop()  # Start updating the map periodically
 
     def setup_ui(self):
         sidebar = tk.Frame(self.root, width=300, bg="#f0f0f0")
@@ -215,6 +230,10 @@ class MapApp:
         self.close_road_button = tk.Button(sidebar, text="Close Road", command=self.enable_road_closure,
                                            bg="orange")
         self.close_road_button.pack(pady=10, padx=10, fill=tk.X)
+
+        self.simulate_traffic_button = tk.Button(sidebar, text="Simulate Traffic", command=self.toggle_traffic_simulation,
+                                                 bg="yellow")
+        self.simulate_traffic_button.pack(pady=10, padx=10, fill=tk.X)
 
         self.clear_button = tk.Button(sidebar, text="Clear Map", command=self.clear_map, bg="lightcoral")
         self.clear_button.pack(pady=10, padx=10, fill=tk.X)
@@ -253,6 +272,24 @@ class MapApp:
             self.canvas.mpl_disconnect(self.cid)
         self.cid = self.canvas.mpl_connect('button_press_event', self.close_road)
         self.log_message("Click on two nodes to close a road (edge).")
+
+    def toggle_traffic_simulation(self):
+        if self.traffic_simulator.running:
+            self.traffic_simulator.stop()
+            self.log_message("Traffic simulation stopped.")
+            self.simulate_traffic_button.config(text="Simulate Traffic")
+        else:
+            self.traffic_simulator.start()
+            self.log_message("Traffic simulation started.")
+            self.simulate_traffic_button.config(text="Stop Traffic Simulation")
+
+    def start_map_update_loop(self):
+        def update():
+            if self.traffic_simulator.running:
+                self.update_map()
+                self.compute_route()
+            self.root.after(5000, update)  # Update every 5 seconds
+        update()
 
     def set_start_node(self, event):
         if event.inaxes:

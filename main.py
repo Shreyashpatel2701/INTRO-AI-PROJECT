@@ -208,17 +208,28 @@ class MapApp:
 
     def set_start_node(self, event):
         if event.inaxes:
-            lon, lat = event.xdata, event.ydata
-            self.start_node = ox.nearest_nodes(self.G, lon, lat)
+            x, y = event.xdata, event.ydata
+            # Convert clicked coordinates to the nearest node in the graph
+            self.start_node = ox.distance.nearest_nodes(self.G, X=x, Y=y, return_dist=False)
             self.log_message(f"Start node set to {self.start_node}.")
-            self.prepare_route_lpa()
+            self.update_map()
 
     def set_stop_node(self, event):
         if event.inaxes:
-            lon, lat = event.xdata, event.ydata
-            self.stop_node = ox.nearest_nodes(self.G, lon, lat)
+            x, y = event.xdata, event.ydata
+            # Convert clicked coordinates to the nearest node in the graph
+            self.stop_node = ox.distance.nearest_nodes(self.G, X=x, Y=y, return_dist=False)
             self.log_message(f"Stop node set to {self.stop_node}.")
-            self.prepare_route_lpa()
+            self.update_map()
+
+    def add_waypoint(self, event):
+        if event.inaxes:
+            x, y = event.xdata, event.ydata
+            # Convert clicked coordinates to the nearest node in the graph
+            waypoint = ox.distance.nearest_nodes(self.G, X=x, Y=y, return_dist=False)
+            self.waypoints.append(waypoint)
+            self.log_message(f"Waypoint added: {waypoint}.")
+            self.update_map()
 
     def add_waypoint(self, event):
         if event.inaxes:

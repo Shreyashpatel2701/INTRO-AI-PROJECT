@@ -15,7 +15,7 @@ import math
 def init_map():
     """Fetch a small road network near Boyd Center, Athens, GA."""
     location_point = (33.938, -83.374)  # Latitude, Longitude of Boyd Center
-    G = ox.graph_from_point(location_point, dist=500, dist_type='bbox', network_type='drive')
+    G = ox.graph_from_point(location_point, dist=700, dist_type='bbox', network_type='drive')
     G = ox.project_graph(G)
 
     # Add weights to edges based on their length
@@ -26,10 +26,11 @@ def init_map():
     return G
 
 
-def plot_map(G, start_node=None, stop_node=None, waypoints=None, path_edges=None):
+def plot_map(G, start_node=None, stop_node=None, waypoints=None, path_edges=None, lpa_edges=None):
     """Visualize the map with start, stop, waypoints, and optional path."""
     node_colors = []
-    edge_colors = ['lightgray'] * len(G.edges())
+    edge_colors = ['gray'] * len(G.edges())
+    edge_widths = [1] * len(G.edges())
 
     for node in G.nodes():
         if node == start_node:
@@ -42,18 +43,29 @@ def plot_map(G, start_node=None, stop_node=None, waypoints=None, path_edges=None
             node_colors.append('white')  # Default node color
 
     if path_edges:
-        for u, v in path_edges:
+        for i, (u, v) in enumerate(path_edges):
             try:
                 edge_idx = list(G.edges).index((u, v, 0))
-                edge_colors[edge_idx] = 'red'  # Path edges in red
+                edge_colors[edge_idx] = 'red' if i < len(path_edges) - 1 else 'purple'  # Differentiate final edges
+                edge_widths[edge_idx] = 3
+            except ValueError:
+                pass
+
+    if lpa_edges:
+        for u, v in lpa_edges:
+            try:
+                edge_idx = list(G.edges).index((u, v, 0))
+                edge_colors[edge_idx] = 'cyan'
+                edge_widths[edge_idx] = 2
             except ValueError:
                 pass
 
     fig, ax = ox.plot_graph(
-        G, node_color=node_colors, node_size=50, edge_color=edge_colors, edge_linewidth=2,
-        figsize=(10, 8), show=False, close=False
+        G, node_color=node_colors, node_size=50, edge_color=edge_colors, edge_linewidth=edge_widths,
+        figsize=(10, 8), show=False, close=False, bgcolor="black"
     )
     return fig, ax
+
 
 
 class LPAStar:
@@ -109,7 +121,7 @@ class LPAStar:
 
     def compute_shortest_path(self):
         while self.priority_queue and (
-            self.g[self.start] != self.rhs[self.start] or self.priority_queue[0][0] < self.calculate_key(self.start)
+                self.g[self.start] != self.rhs[self.start] or self.priority_queue[0][0] < self.calculate_key(self.start)
         ):
             u = self.pop_task()
             if self.g[u] > self.rhs[u]:
@@ -152,16 +164,20 @@ class MapApp:
         sidebar = tk.Frame(self.root, width=300, bg="#f0f0f0")
         sidebar.pack(side=tk.LEFT, fill=tk.Y)
 
-        self.start_button = tk.Button(sidebar, text="Set Start Node", command=self.enable_start_node_selection, bg="lightblue")
+        self.start_button = tk.Button(sidebar, text="Set Start Node", command=self.enable_start_node_selection,
+                                      bg="lightblue")
         self.start_button.pack(pady=10, padx=10, fill=tk.X)
 
-        self.stop_button = tk.Button(sidebar, text="Set Stop Node", command=self.enable_stop_node_selection, bg="lightblue")
+        self.stop_button = tk.Button(sidebar, text="Set Stop Node", command=self.enable_stop_node_selection,
+                                     bg="lightblue")
         self.stop_button.pack(pady=10, padx=10, fill=tk.X)
 
-        self.waypoint_button = tk.Button(sidebar, text="Add Waypoint", command=self.enable_waypoint_selection, bg="lightgreen")
+        self.waypoint_button = tk.Button(sidebar, text="Add Waypoint", command=self.enable_waypoint_selection,
+                                         bg="lightgreen")
         self.waypoint_button.pack(pady=10, padx=10, fill=tk.X)
 
-        self.route_lpa_button = tk.Button(sidebar, text="Find Route with LPA*", command=self.prepare_route_lpa, bg="purple")
+        self.route_lpa_button = tk.Button(sidebar, text="Find Route with LPA*", command=self.prepare_route_lpa,
+                                          bg="purple")
         self.route_lpa_button.pack(pady=10, padx=10, fill=tk.X)
 
         self.clear_button = tk.Button(sidebar, text="Clear Map", command=self.clear_map, bg="lightcoral")
@@ -213,22 +229,33 @@ class MapApp:
             self.prepare_route_lpa()
 
     def prepare_route_lpa(self):
+        """Prepare and compute the route using LPA*."""
         if not self.start_node or not self.stop_node:
-            self.log_message("Start and stop nodes must be set.")
+            self.log_message("Both start and stop nodes must be set.")
             return
 
-        self.heuristic = {"Shortest Distance": "weight", "Least Cost": "cost", "Shortest Time": "time"}[
-            self.heuristic_option.get()
-        ]
+        heuristic_map = {
+            "Shortest Distance": "weight",
+            "Least Cost": "cost",
+            "Shortest Time": "time"
+        }
+        self.heuristic = heuristic_map[self.heuristic_option.get()]
+
         lpa = LPAStar(self.G, self.start_node, self.stop_node, heuristic=self.heuristic)
         lpa.compute_shortest_path()
-
         path = lpa.get_shortest_path()
-        for waypoint in self.waypoints:
-            path.insert(-1, waypoint)
+        lpa_edges = [(path[i], path[i + 1]) for i in range(len(path) - 1)]
+
+        if self.waypoints:
+            path = [self.start_node]
+            for waypoint in self.waypoints:
+                sub_path = nx.shortest_path(self.G, path[-1], waypoint, weight=self.heuristic)
+                path.extend(sub_path[1:])
+            final_path = nx.shortest_path(self.G, path[-1], self.stop_node, weight=self.heuristic)
+            path.extend(final_path[1:])
 
         path_edges = [(path[i], path[i + 1]) for i in range(len(path) - 1)]
-        self.fig, self.ax = plot_map(self.G, self.start_node, self.stop_node, self.waypoints, path_edges)
+        self.fig, self.ax = plot_map(self.G, self.start_node, self.stop_node, self.waypoints, path_edges, lpa_edges)
         self.canvas.figure = self.fig
         self.canvas.draw()
         self.log_message(f"LPA* route computed: {path}.")
@@ -256,4 +283,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

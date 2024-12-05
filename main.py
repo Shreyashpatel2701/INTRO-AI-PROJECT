@@ -7,10 +7,9 @@ import matplotlib.pyplot as plt
 import threading
 import random
 import time
-import heapq
 import itertools
 import math
-
+import heapq  # Added missing import
 
 def init_map():
     """Fetch a small road network near Boyd Center, Athens, GA."""
@@ -21,41 +20,55 @@ def init_map():
     # Add weights to edges based on their length
     for u, v, key, data in G.edges(keys=True, data=True):
         data['weight'] = data.get('length', 1.0)  # Default to 1.0 if 'length' not available
+        data['original_weight'] = data['weight']  # Store original weight
         data['cost'] = data['weight'] * random.uniform(0.8, 1.5)  # Add cost factor
         data['time'] = data['weight'] / random.uniform(20, 50)  # Simulate travel time
     return G
 
+def simulate_traffic_updates(G, interval=5):
+    """Simulate traffic by updating weights randomly every `interval` seconds."""
+    def update_traffic():
+        while True:
+            for u, v, key, data in G.edges(keys=True, data=True):
+                traffic_factor = random.uniform(0.8, 2.0)  # Simulate traffic (weights vary)
+                data['weight'] = data['original_weight'] * traffic_factor  # Use original weight
+                data['cost'] = data['weight'] * random.uniform(0.8, 1.5)
+                data['time'] = data['weight'] / random.uniform(20, 50)
+            time.sleep(interval)
+    threading.Thread(target=update_traffic, daemon=True).start()
 
-def plot_map(G, start_node=None, stop_node=None, waypoints=None, path_edges=None, lpa_edges=None):
-    """Visualize the map with start, stop, waypoints, and optional path."""
+def plot_map_with_closures(G, start_node=None, stop_node=None, waypoints=None, path_edges=None, closed_edges=None):
+    """Visualize the map, highlighting closed edges."""
     node_colors = []
     edge_colors = ['gray'] * len(G.edges())
     edge_widths = [1] * len(G.edges())
+    edge_tuples = list(G.edges(keys=True))
 
     for node in G.nodes():
         if node == start_node:
-            node_colors.append('green')  # Highlight the start node
+            node_colors.append('green')
         elif node == stop_node:
-            node_colors.append('blue')  # Highlight the stop node
+            node_colors.append('blue')
         elif waypoints and node in waypoints:
-            node_colors.append('orange')  # Highlight waypoints
+            node_colors.append('orange')
         else:
-            node_colors.append('white')  # Default node color
+            node_colors.append('white')
 
     if path_edges:
-        for i, (u, v) in enumerate(path_edges):
-            try:
-                edge_idx = list(G.edges).index((u, v, 0))
-                edge_colors[edge_idx] = 'red' if i < len(path_edges) - 1 else 'purple'  # Differentiate final edges
-                edge_widths[edge_idx] = 3
-            except ValueError:
-                pass
+        for u, v in path_edges:
+            for key in G[u][v]:
+                try:
+                    edge_idx = edge_tuples.index((u, v, key))
+                    edge_colors[edge_idx] = 'red'
+                    edge_widths[edge_idx] = 3
+                except ValueError:
+                    pass
 
-    if lpa_edges:
-        for u, v in lpa_edges:
+    if closed_edges:
+        for u, v, key in closed_edges:
             try:
-                edge_idx = list(G.edges).index((u, v, 0))
-                edge_colors[edge_idx] = 'cyan'
+                edge_idx = edge_tuples.index((u, v, key))
+                edge_colors[edge_idx] = 'cyan'  # Closed edges in cyan
                 edge_widths[edge_idx] = 2
             except ValueError:
                 pass
@@ -65,8 +78,6 @@ def plot_map(G, start_node=None, stop_node=None, waypoints=None, path_edges=None
         figsize=(10, 8), show=False, close=False, bgcolor="black"
     )
     return fig, ax
-
-
 
 class LPAStar:
     def __init__(self, graph, start, goal, heuristic='weight'):
@@ -104,16 +115,27 @@ class LPAStar:
         raise KeyError('pop from an empty priority queue')
 
     def calculate_key(self, node):
-        return (min(self.g[node], self.rhs[node]) + self.heuristic(node, self.goal), min(self.g[node], self.rhs[node]))
+        k1 = min(self.g[node], self.rhs[node]) + self.heuristic(self.start, node)
+        k2 = min(self.g[node], self.rhs[node])
+        return (k1, k2)
 
     def heuristic(self, node1, node2):
-        y1, x1 = self.G.nodes[node1]['y'], self.G.nodes[node1]['x']
-        y2, x2 = self.G.nodes[node2]['y'], self.G.nodes[node2]['x']
-        return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+        if self.heuristic_type == 'weight':
+            y1, x1 = self.G.nodes[node1]['y'], self.G.nodes[node1]['x']
+            y2, x2 = self.G.nodes[node2]['y'], self.G.nodes[node2]['x']
+            return math.hypot(x1 - x2, y1 - y2)
+        else:
+            return 0  # Zero heuristic for time and cost
 
     def update_vertex(self, u):
         if u != self.goal:
-            self.rhs[u] = min([self.G[u][v].get(self.heuristic_type, 1.0) + self.g[v] for v in self.G.neighbors(u)])
+            self.rhs[u] = min([
+                min([
+                    edge_data.get(self.heuristic_type, 1.0) + self.g[v]
+                    for edge_data in self.G.get_edge_data(u, v).values()
+                ])
+                for v in self.G.successors(u)
+            ], default=float('inf'))
         if u in self.entry_finder:
             self.remove_task(u)
         if self.g[u] != self.rhs[u]:
@@ -121,28 +143,38 @@ class LPAStar:
 
     def compute_shortest_path(self):
         while self.priority_queue and (
-                self.g[self.start] != self.rhs[self.start] or self.priority_queue[0][0] < self.calculate_key(self.start)
+            self.g[self.start] != self.rhs[self.start] or self.priority_queue[0][0] < self.calculate_key(self.start)
         ):
             u = self.pop_task()
             if self.g[u] > self.rhs[u]:
                 self.g[u] = self.rhs[u]
+                for pred in self.G.predecessors(u):
+                    self.update_vertex(pred)
             else:
                 self.g[u] = float('inf')
-            self.update_vertex(u)
-            for v in self.G.neighbors(u):
-                self.update_vertex(v)
+                self.update_vertex(u)
+                for pred in self.G.predecessors(u):
+                    self.update_vertex(pred)
 
     def get_shortest_path(self):
         path = [self.start]
         node = self.start
         while node != self.goal:
-            node = min(
-                (self.G[node][v].get(self.heuristic_type, 1.0) + self.g[v], v)
-                for v in self.G.neighbors(node)
-            )[1]
+            successors = list(self.G.successors(node))
+            if not successors:
+                return []  # No path found
+            min_cost, min_node = min(
+                (
+                    min([
+                        edge_data.get(self.heuristic_type, 1.0)
+                        for edge_data in self.G.get_edge_data(node, v).values()
+                    ]) + self.g[v], v
+                )
+                for v in successors
+            )
+            node = min_node
             path.append(node)
         return path
-
 
 class MapApp:
     def __init__(self, root, G):
@@ -151,14 +183,18 @@ class MapApp:
         self.start_node = None
         self.stop_node = None
         self.waypoints = []
+        self.closed_edges = set()
+        self.temp_node = None  # Temporary node for road closure selection
         self.heuristic = 'weight'
-        self.fig, self.ax = plot_map(G)
+        self.cid = None  # For event handling
+        self.fig, self.ax = plot_map_with_closures(G)
         self.canvas = FigureCanvasTkAgg(self.fig, master=root)
         self.canvas.draw()
         self.canvas_widget = self.canvas.get_tk_widget()
         self.canvas_widget.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
         self.setup_ui()
+        simulate_traffic_updates(self.G)  # Start traffic simulation
 
     def setup_ui(self):
         sidebar = tk.Frame(self.root, width=300, bg="#f0f0f0")
@@ -176,9 +212,9 @@ class MapApp:
                                          bg="lightgreen")
         self.waypoint_button.pack(pady=10, padx=10, fill=tk.X)
 
-        self.route_lpa_button = tk.Button(sidebar, text="Find Route with LPA*", command=self.prepare_route_lpa,
-                                          bg="purple")
-        self.route_lpa_button.pack(pady=10, padx=10, fill=tk.X)
+        self.close_road_button = tk.Button(sidebar, text="Close Road", command=self.enable_road_closure,
+                                           bg="orange")
+        self.close_road_button.pack(pady=10, padx=10, fill=tk.X)
 
         self.clear_button = tk.Button(sidebar, text="Clear Map", command=self.clear_map, bg="lightcoral")
         self.clear_button.pack(pady=10, padx=10, fill=tk.X)
@@ -195,41 +231,48 @@ class MapApp:
         self.log_text.see(tk.END)
 
     def enable_start_node_selection(self):
-        self.canvas.mpl_connect('button_press_event', self.set_start_node)
+        if self.cid is not None:
+            self.canvas.mpl_disconnect(self.cid)
+        self.cid = self.canvas.mpl_connect('button_press_event', self.set_start_node)
         self.log_message("Click on the map to set the start node.")
 
     def enable_stop_node_selection(self):
-        self.canvas.mpl_connect('button_press_event', self.set_stop_node)
+        if self.cid is not None:
+            self.canvas.mpl_disconnect(self.cid)
+        self.cid = self.canvas.mpl_connect('button_press_event', self.set_stop_node)
         self.log_message("Click on the map to set the stop node.")
 
     def enable_waypoint_selection(self):
-        self.canvas.mpl_connect('button_press_event', self.add_waypoint)
+        if self.cid is not None:
+            self.canvas.mpl_disconnect(self.cid)
+        self.cid = self.canvas.mpl_connect('button_press_event', self.add_waypoint)
         self.log_message("Click on the map to add a waypoint.")
+
+    def enable_road_closure(self):
+        if self.cid is not None:
+            self.canvas.mpl_disconnect(self.cid)
+        self.cid = self.canvas.mpl_connect('button_press_event', self.close_road)
+        self.log_message("Click on two nodes to close a road (edge).")
 
     def set_start_node(self, event):
         if event.inaxes:
-            x, y = event.xdata, event.ydata
-            # Convert clicked coordinates to the nearest node in the graph
-            self.start_node = ox.distance.nearest_nodes(self.G, X=x, Y=y, return_dist=False)
+            lon, lat = event.xdata, event.ydata
+            self.start_node = ox.nearest_nodes(self.G, lon, lat)
             self.log_message(f"Start node set to {self.start_node}.")
-            self.update_map()
+            self.compute_route()
+            if self.cid is not None:
+                self.canvas.mpl_disconnect(self.cid)
+                self.cid = None
 
     def set_stop_node(self, event):
         if event.inaxes:
-            x, y = event.xdata, event.ydata
-            # Convert clicked coordinates to the nearest node in the graph
-            self.stop_node = ox.distance.nearest_nodes(self.G, X=x, Y=y, return_dist=False)
+            lon, lat = event.xdata, event.ydata
+            self.stop_node = ox.nearest_nodes(self.G, lon, lat)
             self.log_message(f"Stop node set to {self.stop_node}.")
-            self.update_map()
-
-    def add_waypoint(self, event):
-        if event.inaxes:
-            x, y = event.xdata, event.ydata
-            # Convert clicked coordinates to the nearest node in the graph
-            waypoint = ox.distance.nearest_nodes(self.G, X=x, Y=y, return_dist=False)
-            self.waypoints.append(waypoint)
-            self.log_message(f"Waypoint added: {waypoint}.")
-            self.update_map()
+            self.compute_route()
+            if self.cid is not None:
+                self.canvas.mpl_disconnect(self.cid)
+                self.cid = None
 
     def add_waypoint(self, event):
         if event.inaxes:
@@ -237,10 +280,34 @@ class MapApp:
             waypoint = ox.nearest_nodes(self.G, lon, lat)
             self.waypoints.append(waypoint)
             self.log_message(f"Waypoint added: {waypoint}.")
-            self.prepare_route_lpa()
+            self.compute_route()
+            if self.cid is not None:
+                self.canvas.mpl_disconnect(self.cid)
+                self.cid = None
 
-    def prepare_route_lpa(self):
-        """Prepare and compute the route using LPA*."""
+    def close_road(self, event):
+        if event.inaxes:
+            lon, lat = event.xdata, event.ydata
+            node = ox.nearest_nodes(self.G, lon, lat)
+            if not self.temp_node:
+                self.temp_node = node
+                self.log_message(f"Selected node {node} for road closure.")
+            else:
+                if self.G.has_edge(self.temp_node, node):
+                    edge_keys = list(self.G[self.temp_node][node].keys())
+                    for key in edge_keys:
+                        self.G.remove_edge(self.temp_node, node, key=key)
+                        self.closed_edges.add((self.temp_node, node, key))
+                    self.log_message(f"Road between {self.temp_node} and {node} closed.")
+                else:
+                    self.log_message(f"No edge between {self.temp_node} and {node} to close.")
+                self.temp_node = None
+                self.compute_route()
+            if self.cid is not None:
+                self.canvas.mpl_disconnect(self.cid)
+                self.cid = None
+
+    def compute_route(self):
         if not self.start_node or not self.stop_node:
             self.log_message("Both start and stop nodes must be set.")
             return
@@ -252,45 +319,50 @@ class MapApp:
         }
         self.heuristic = heuristic_map[self.heuristic_option.get()]
 
-        lpa = LPAStar(self.G, self.start_node, self.stop_node, heuristic=self.heuristic)
-        lpa.compute_shortest_path()
-        path = lpa.get_shortest_path()
-        lpa_edges = [(path[i], path[i + 1]) for i in range(len(path) - 1)]
+        # Compute route with waypoints using LPA*
+        all_nodes = [self.start_node] + self.waypoints + [self.stop_node]
+        path = []
+        try:
+            for i in range(len(all_nodes) - 1):
+                lpa = LPAStar(self.G, all_nodes[i], all_nodes[i + 1], heuristic=self.heuristic)
+                lpa.compute_shortest_path()
+                sub_path = lpa.get_shortest_path()
+                if not sub_path:
+                    raise Exception(f"No path found between {all_nodes[i]} and {all_nodes[i+1]}")
+                if i > 0:  # Avoid duplicating nodes
+                    sub_path = sub_path[1:]
+                path.extend(sub_path)
+            path_edges = [(path[i], path[i + 1]) for i in range(len(path) - 1)]
+        except Exception as e:
+            self.log_message(f"Error computing route: {e}")
+            path_edges = []
+            path = []
 
-        if self.waypoints:
-            path = [self.start_node]
-            for waypoint in self.waypoints:
-                sub_path = nx.shortest_path(self.G, path[-1], waypoint, weight=self.heuristic)
-                path.extend(sub_path[1:])
-            final_path = nx.shortest_path(self.G, path[-1], self.stop_node, weight=self.heuristic)
-            path.extend(final_path[1:])
-
-        path_edges = [(path[i], path[i + 1]) for i in range(len(path) - 1)]
-        self.fig, self.ax = plot_map(self.G, self.start_node, self.stop_node, self.waypoints, path_edges, lpa_edges)
+        self.fig, self.ax = plot_map_with_closures(self.G, self.start_node, self.stop_node, self.waypoints, path_edges, self.closed_edges)
         self.canvas.figure = self.fig
         self.canvas.draw()
-        self.log_message(f"LPA* route computed: {path}.")
+        self.log_message(f"Route computed: {path}.")
 
     def clear_map(self):
         self.start_node = None
         self.stop_node = None
         self.waypoints = []
+        self.closed_edges = set()
+        self.temp_node = None
         self.update_map()
         self.log_message("Map cleared.")
 
     def update_map(self):
-        self.fig, self.ax = plot_map(self.G, self.start_node, self.stop_node, self.waypoints)
+        self.fig, self.ax = plot_map_with_closures(self.G, self.start_node, self.stop_node, self.waypoints, closed_edges=self.closed_edges)
         self.canvas.figure = self.fig
         self.canvas.draw()
-
 
 def main():
     G = init_map()
     root = tk.Tk()
-    root.title("Interactive Traffic Routing System with LPA*")
+    root.title("Interactive Map Routing System with LPA*")
     app = MapApp(root, G)
     root.mainloop()
-
 
 if __name__ == "__main__":
     main()
